@@ -2,70 +2,81 @@ import axios, { AxiosError } from 'axios'
 import { parseCookies, setCookie } from 'nookies'
 import { signOut } from '../contexts/AuthContext'
 
-const cookies = parseCookies()
 let isRefreshing = false
 let failedRequestQueue = []
 
-export const api = axios.create({
-  baseURL: 'http://localhost:3333',
-  headers: {
-    Authorization: `Bearer ${cookies['nextauth.token']}`
-  },
-})
+export function setupApiClient(ctx = undefined) {
+  const cookies = parseCookies(ctx)
 
-api.interceptors.response.use(response => response, (error: AxiosError) => {
-  if (error.response.status === 401) {
-    if (error.response.data?.code === 'token.expired') {
-      const { 'nextauth.refreshToken': refreshToken } = parseCookies()
-      const originalConfig = error.config
+  const api = axios.create({
+    baseURL: 'http://localhost:3333',
+    headers: {
+      Authorization: `Bearer ${cookies['nextauth.token']}`
+    },
+  })
 
-      if (!isRefreshing) {
-        isRefreshing = true
+  api.interceptors.response.use(response => response, (error: AxiosError) => {
+    if (error.response.status === 401) {
+      if (error.response.data?.code === 'token.expired') {
+        const { 'nextauth.refreshToken': refreshToken } = parseCookies(ctx)
+        const originalConfig = error.config
 
-        api.post('refresh', { refreshToken }).then(response => {
-          const { token } = response.data
+        if (!isRefreshing) {
+          isRefreshing = true
 
-          const THIRTY_DAYS = 60 * 60 * 24 * 30
+          api.post('refresh', { refreshToken }).then(response => {
+            const { token } = response.data
 
-          setCookie(undefined, 'nextauth.token', token, {
-            maxAge: THIRTY_DAYS,
-            path: '/'
+            const THIRTY_DAYS = 60 * 60 * 24 * 30
+
+            setCookie(ctx, 'nextauth.token', token, {
+              maxAge: THIRTY_DAYS,
+              path: '/'
+            })
+
+            setCookie(ctx, 'nextauth.refreshToken', response.data.refreshToken, {
+              maxAge: THIRTY_DAYS,
+              path: '/'
+            })
+
+            api.defaults.headers['Authorization'] = `Bearer ${token}`
+
+            failedRequestQueue.forEach(request => request.onSuccess(token))
+            failedRequestQueue = []
+          }).catch(err => {
+            failedRequestQueue.forEach(request => request.onFailure(err))
+            failedRequestQueue = []
+
+            if (process.browser) {
+              signOut()
+            }
+          }).finally(() => {
+            isRefreshing = false
           })
+        }
 
-          setCookie(undefined, 'nextauth.refreshToken', response.data.refreshToken, {
-            maxAge: THIRTY_DAYS,
-            path: '/'
+        return new Promise((resolve, reject) => {
+          failedRequestQueue.push({
+            onSuccess: (token: string) => {
+              originalConfig.headers['Authorization'] = `Bearer ${token}`
+
+              resolve(api(originalConfig))
+            },
+
+            onFailure: (err: AxiosError) => {
+              reject(err)
+            }
           })
-
-          api.defaults.headers['Authorization'] = `Bearer ${token}`
-
-          failedRequestQueue.forEach(request => request.onSuccess(token))
-          failedRequestQueue = []
-        }).catch(err => {
-          failedRequestQueue.forEach(request => request.onFailure(err))
-          failedRequestQueue = []
-        }).finally(() => {
-          isRefreshing = false
         })
+      } else {
+        if (process.browser) {
+          signOut()
+        }
       }
 
-      return new Promise((resolve, reject) => {
-        failedRequestQueue.push({
-          onSuccess: (token: string) => {
-            originalConfig.headers['Authorization'] = `Bearer ${token}`
-
-            resolve(api(originalConfig))
-          },
-
-          onFailure: (err: AxiosError) => {
-            reject(err)
-          }
-        })
-      })
-    } else {
-      signOut()
+      return Promise.reject(error)
     }
+  })
 
-    return Promise.reject(error)
-  }
-})
+  return api
+}
